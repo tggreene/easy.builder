@@ -5,9 +5,7 @@
 
 ;; Top Level
 
-(def example-context
-  {:project-root "path..."
-   :primary-source-path "path..."})
+
 
 (defn create-file
   [path contents]
@@ -67,10 +65,6 @@
               :project-deps-file (when (.exists (io/file maybe-deps))
                                    maybe-deps)
               :primary-source-path maybe-source-path)))))
-
-(comment
-  (.exists (io/file (str (System/getProperty "user.dir") "/deps.edn")))
-  )
 
 (defn with-create-action
   [handler]
