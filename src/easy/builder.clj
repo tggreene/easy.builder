@@ -1,50 +1,63 @@
 (ns easy.builder
   (:require [clojure.java.io :as io]
             [easy.impl.deps :as deps]
+            [easy.impl.rewrite :as rewrite]
             [easy.static :as static]))
 
 ;; Top Level
 
+(defn op-succeeded
+  [message]
+  {:type :result
+   :status :succeeded
+   :message message})
 
+(defn op-failed
+  [message]
+  {:type :result
+   :status :failed
+   :message message})
 
 (defn create-file
   [path contents]
-  (let [{:keys [path contents]} action]
-    (if (.exists (io/file path))
-      (add-result context (str "File " path " already exists"))
-      (do (spit path contents)
-          (add-result context (str "Created file " path))))))
+  {:type :operation
+   :operation-type :create-file
+   :operation (fn []
+                (if (.exists (io/file path))
+                  (op-failed (str "File " path " already exists"))
+                  (do (spit path contents)
+                      (op-succeeded (str "Created file " path)))))
+   :contents contents
+   :path path})
+
+(defn src-path
+  [context & args]
+  (apply str (get-in context [:project :src-path]) "/" (interpose "/" args)))
+
+(comment
+  (src-path {:project {:src-path "/tmp/x"}} "hello" "world.clj")
+
+  )
 
 (defn resolve-operations-dispatch*
-  [context]
-  (:target-action context))
+  [_context target-action]
+  target-action)
 
 (defmulti resolve-operations resolve-operations-dispatch*)
 
 (defmethod resolve-operations :add-system-config
-  [context]
-  [{:type :operation
-    :operation-type :create-file
-    :operation (fn [])
-    :contents static/system-config
-    :path (str (:primary-source-path context) "/config.edn")}])
+  [context _]
+  [(create-file (src-path context "config.edn")
+                static/system-config)])
 
 (defmethod resolve-operations :add-logging-config
-  [context]
-  [{:type :operation
-    :operation-type :create-file
-    :operation (fn [])
-    :contents static/system-config
-    :path (str (:primary-source-path context) "/config.edn")}
-   {:type :operation
-    :operation-type :rewrite-file
-    :operation (fn [])
-    :contents static/system-config
-    :path (str (:primary-source-path context) "/config.edn")}])
+  [context _]
+  [(create-file (src-path context "logback.xml") "something")
+   (rewrite/rewrite-file (get-in context [:project :deps-path])
+                         (deps/add-dep 'ch.qos.logback/logback-classic
+                                       {:mvn/version "1.2.3"}))])
 
 ;; Middleware
-
-(defn with-project-name [])
 
 (defn with-project-context
   [handler]
@@ -61,10 +74,10 @@
                                    (str project-root "/")))]
       (handler
        (assoc context
-              :project-root project-root
-              :project-deps-file (when (.exists (io/file maybe-deps))
-                                   maybe-deps)
-              :primary-source-path maybe-source-path)))))
+              :project {:root-path project-root
+                        :deps-path (when (.exists (io/file maybe-deps))
+                                             maybe-deps)
+                        :src-path maybe-source-path})))))
 
 (defn with-create-action
   [handler]
@@ -73,10 +86,23 @@
       (handler (assoc context :action action)))))
 
 (defn with-resolve-operations
-  []
+  [handler]
   (fn [context]
-    (let [ops (resolve-operations context)]
+    (let [operations (mapcat (partial resolve-operations context)
+                             (:target-actions context))]
       (handler (assoc context :operations operations)))) )
+
+(defn perform-operations
+  [context]
+  (reduce (fn [context {:keys [operation]}]
+            (add-result context (operation)))
+          context
+          (:operations context)))
+
+(defn with-perform-operations
+  [handler]
+  (fn [context]
+    (handler (perform-operations context))))
 
 (defn resolve-action-dispatch*
   [context]
@@ -86,48 +112,26 @@
   [context result]
   (update context :results (fnil conj []) result))
 
-(defmulti resolve-action #'resolve-action-dispatch*)
-(defmethod resolve-action :default
-  [context]
-  (add-result context "No action resolved"))
-
-(defn resolve-path
-  [context path]
-  (reduce (fn [result segment]
-            (cond
-              (string? segment) (str result segment)
-              (keyword? segment) (str result (get context segment))
-              (vector? segment) (str result (get-in context segment))))
-          ""
-          path))
-
-(defmethod resolve-action :create-file
-  [{:keys [action] :as context}]
-  (let [{:keys [path contents]} action]
-    (if (.exists (io/file path))
-      (add-result context (str "File " path " already exists"))
-      (do (spit path contents)
-          (add-result context (str "Created file " path))))))
-
 (defn apply-middleware
   [handler]
   (-> handler
-      (with-create-action)
+      (with-perform-operations)
+      (with-resolve-operations)
       (with-project-context)))
 
-(defn perform-operations
+(defn handler*
   [context]
-  (resolve-action context))
+  context)
 
 (def handler
-  (apply-middleware perform-operations))
+  (apply-middleware handler*))
 
 ;; API
 
 (defn add-system-config
   []
-  (handler {:target-action :add-system-config}))
+  (handler {:target-actions [:add-system-config]}))
 
 (defn add-logging-config
   []
-  (handler {:target-action :add-logging-config}))
+  (handler {:target-actions [:add-logging-config]}))
